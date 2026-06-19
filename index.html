@@ -213,6 +213,9 @@
             </div>
             <div class="chart-container">
                 <div class="chart-title" id="chartTitle">Últimos 7 días</div>
+                <div id="balanceDetailToggle" style="display:none; text-align:center; margin-bottom:10px;">
+                    <button onclick="toggleBalanceDetail()" id="detailBtn" style="background:none; border:1px solid #5b9bd5; color:#5b9bd5; padding:5px 14px; border-radius:15px; font-size:12px; cursor:pointer;">Ver detalle</button>
+                </div>
                 <canvas id="chart"></canvas>
                 <div class="chart-legend" id="chartLegend">
                     <div class="legend-item"><div class="legend-dot expense"></div>Gastos</div>
@@ -241,6 +244,7 @@
         let state = loadState();
         let currentType = 'expense';
         let chartView = 'day';
+        let balanceDetailMode = false;
 
         function loadState() {
             try {
@@ -392,6 +396,12 @@
             }
         }
         // Gráficas
+        function toggleBalanceDetail() {
+            balanceDetailMode = !balanceDetailMode;
+            document.getElementById('detailBtn').textContent = balanceDetailMode ? 'Ver general' : 'Ver detalle';
+            drawChart();
+        }
+
         function setChartView(view) {
             chartView = view;
             document.getElementById('tabDay').className = view === 'day' ? 'active' : '';
@@ -399,6 +409,8 @@
             document.getElementById('tabBalance').className = view === 'balance' ? 'active' : '';
             const titles = { day: 'Últimos 7 días', week: 'Últimas 4 semanas', balance: 'Evolución del saldo' };
             document.getElementById('chartTitle').textContent = titles[view];
+            // Toggle detalle btn
+            document.getElementById('balanceDetailToggle').style.display = view === 'balance' ? 'block' : 'none';
             // Update legend
             const legendEl = document.getElementById('chartLegend');
             if (view === 'balance') {
@@ -474,7 +486,12 @@
         }
 
         function drawBalanceChart(ctx, W, H) {
-            // Calcular saldo por cada uno de los últimos 7 días
+            if (balanceDetailMode) {
+                drawBalanceDetail(ctx, W, H);
+                return;
+            }
+
+            // Vista general: un punto por día (últimos 7 días)
             const points = [];
             const labels = [];
 
@@ -484,35 +501,80 @@
                 const dayName = d.toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric' });
                 labels.push(dayName);
 
-                // Calcular saldo acumulado hasta ese día
                 let balance = state.initialBalance;
                 for (const entry of state.entries) {
                     const entryDate = entry.timestamp ? entry.timestamp.split('T')[0] : '';
                     if (entryDate <= key) {
-                        if (entry.type === 'income' || entry.type === 'initial') {
-                            balance += entry.amount;
-                        } else if (entry.type === 'expense') {
-                            balance -= entry.amount;
-                        }
+                        if (entry.type === 'income' || entry.type === 'initial') balance += entry.amount;
+                        else if (entry.type === 'expense') balance -= entry.amount;
                     }
                 }
                 points.push(balance);
             }
 
+            drawLineChart(ctx, W, H, points, labels);
+        }
+
+        function drawBalanceDetail(ctx, W, H) {
+            // Vista detalle: cada movimiento como un punto individual
+            const sorted = [...state.entries].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+            const last15 = sorted.slice(-15);
+
+            if (last15.length === 0) {
+                ctx.fillStyle = document.body.classList.contains('light') ? '#aaa' : '#555';
+                ctx.font = '13px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Sin movimientos', W / 2, H / 2);
+                return;
+            }
+
+            const points = [];
+            const labels = [];
+            let balance = state.initialBalance;
+
+            // Calcular saldo antes del primer punto mostrado
+            for (const entry of sorted) {
+                if (last15.includes(entry)) break;
+                if (entry.type === 'income' || entry.type === 'initial') balance += entry.amount;
+                else if (entry.type === 'expense') balance -= entry.amount;
+            }
+
+            // Punto inicial
+            points.push(balance);
+            labels.push('inicio');
+
+            for (const entry of last15) {
+                if (entry.type === 'income' || entry.type === 'initial') balance += entry.amount;
+                else if (entry.type === 'expense') balance -= entry.amount;
+                points.push(balance);
+
+                const entryDate = entry.timestamp ? entry.timestamp.split('T')[0] : '';
+                const today = new Date().toISOString().split('T')[0];
+                if (entryDate === today) {
+                    const t = new Date(entry.timestamp);
+                    labels.push(t.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }));
+                } else {
+                    const t = new Date(entry.timestamp);
+                    labels.push(t.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' }));
+                }
+            }
+
+            drawLineChart(ctx, W, H, points, labels);
+        }
+
+        function drawLineChart(ctx, W, H, points, labels) {
             const maxVal = Math.max(...points, 1);
             const minVal = Math.min(...points, 0);
             const range = maxVal - minVal || 1;
             const chartH = H - 50;
             const padX = 30;
-            const stepX = (W - padX * 2) / (points.length - 1);
+            const stepX = points.length > 1 ? (W - padX * 2) / (points.length - 1) : 0;
 
-            // Dibujar área bajo la línea
+            // Área
             ctx.beginPath();
             ctx.moveTo(padX, H - 30 - ((points[0] - minVal) / range) * chartH);
             for (let i = 1; i < points.length; i++) {
-                const x = padX + i * stepX;
-                const y = H - 30 - ((points[i] - minVal) / range) * chartH;
-                ctx.lineTo(x, y);
+                ctx.lineTo(padX + i * stepX, H - 30 - ((points[i] - minVal) / range) * chartH);
             }
             ctx.lineTo(padX + (points.length - 1) * stepX, H - 30);
             ctx.lineTo(padX, H - 30);
@@ -520,43 +582,53 @@
             ctx.fillStyle = 'rgba(91, 155, 213, 0.15)';
             ctx.fill();
 
-            // Dibujar línea
+            // Línea
             ctx.beginPath();
             ctx.moveTo(padX, H - 30 - ((points[0] - minVal) / range) * chartH);
             for (let i = 1; i < points.length; i++) {
-                const x = padX + i * stepX;
-                const y = H - 30 - ((points[i] - minVal) / range) * chartH;
-                ctx.lineTo(x, y);
+                ctx.lineTo(padX + i * stepX, H - 30 - ((points[i] - minVal) / range) * chartH);
             }
             ctx.strokeStyle = '#5b9bd5';
             ctx.lineWidth = 2.5;
             ctx.lineJoin = 'round';
             ctx.stroke();
 
-            // Dibujar puntos y labels
+            // Puntos y labels
             for (let i = 0; i < points.length; i++) {
                 const x = padX + i * stepX;
                 const y = H - 30 - ((points[i] - minVal) / range) * chartH;
 
-                // Punto
+                // Color: rojo si bajó, verde si subió
+                let dotColor = '#5b9bd5';
+                if (i > 0) {
+                    dotColor = points[i] < points[i-1] ? '#e94560' : points[i] > points[i-1] ? '#4ecca3' : '#5b9bd5';
+                }
+
                 ctx.beginPath();
                 ctx.arc(x, y, 4, 0, Math.PI * 2);
-                ctx.fillStyle = '#5b9bd5';
+                ctx.fillStyle = dotColor;
                 ctx.fill();
                 ctx.strokeStyle = document.body.classList.contains('light') ? '#fff' : '#16213e';
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // Label día
-                ctx.fillStyle = document.body.classList.contains('light') ? '#888' : '#666';
-                ctx.font = '10px -apple-system, sans-serif';
-                ctx.textAlign = 'center';
-                ctx.fillText(labels[i], x, H - 10);
+                // Label
+                if (labels[i] && points.length <= 10) {
+                    ctx.fillStyle = document.body.classList.contains('light') ? '#888' : '#666';
+                    ctx.font = '9px Inter, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.save();
+                    ctx.translate(x, H - 8);
+                    ctx.rotate(-0.4);
+                    ctx.fillText(labels[i], 0, 0);
+                    ctx.restore();
+                }
 
-                // Valor encima del punto
+                // Valor en primer y último punto
                 if (i === 0 || i === points.length - 1) {
                     ctx.fillStyle = '#5b9bd5';
-                    ctx.font = '10px -apple-system, sans-serif';
+                    ctx.font = '10px Inter, sans-serif';
+                    ctx.textAlign = 'center';
                     ctx.fillText(formatMoneyShort(points[i]), x, y - 12);
                 }
             }
